@@ -10474,6 +10474,10 @@ process [ all | odd | even | <number 1-64>[-<number 1-64>] ]
   and allow a smoother inter-process load balancing. Currently Linux 3.9 and
   above is known for supporting this. See also "bind-process" and "nbproc".
 
+psk-file <file>
+  Enables use of PSK cipher suites with PSKs stored in the specified file.
+  The entries should be in form "identity:key", one per line.
+
 ssl
   This setting is only available when support for OpenSSL was built in. It
   enables SSL deciphering on connections instantiated from this listener. A
@@ -11083,6 +11087,12 @@ port <port>
   set. See also the "addr" parameter.
 
   Supported in default-server: Yes
+
+psk <identity:key>
+  Sets the PSK to use when connecting to the backend server over SSL, if the PSK
+  cipher suite is negotiated. The entry must be in form "identity:key".
+
+  Supported in default-server: No
 
 redir <prefix>
   The "redir" parameter enables the redirection mode for all GET and HEAD

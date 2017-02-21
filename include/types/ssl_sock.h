@@ -25,6 +25,11 @@
 #include <openssl/ssl.h>
 #include <ebmbtree.h>
 
+struct psk_pair {
+	char *key;
+	struct ebmb_node node;
+};
+
 struct sni_ctx {
 	SSL_CTX *ctx;             /* context associated to the certificate */
 	int order;                /* load order for the certificate */

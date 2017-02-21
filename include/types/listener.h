@@ -134,6 +134,7 @@ struct bind_conf {
 	int strict_sni;            /* refuse negotiation if sni doesn't match a certificate */
 	struct eb_root sni_ctx;    /* sni_ctx tree of all known certs full-names sorted by name */
 	struct eb_root sni_w_ctx;  /* sni_ctx tree of all known certs wildcards sorted by name */
+	struct eb_root psk;        /* PSK tree, keyed by identity */
 	struct tls_keys_ref *keys_ref; /* TLS ticket keys reference */
 
 	char *ca_sign_file;        /* CAFile used to generate and sign server certificates */

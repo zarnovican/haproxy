@@ -498,6 +498,31 @@ end:
 	return ret;
 }
 
+static int ssl_srv_psk_cb(SSL *ssl, char *identity, unsigned char *psk, unsigned int max_psk_len)
+{
+	struct connection *conn;
+	struct ebmb_node *node;
+	struct psk_pair *pp;
+	int keylen;
+
+	conn = SSL_get_app_data(ssl);
+
+	node = ebst_lookup(&objt_listener(conn->target)->bind_conf->psk, identity);
+
+	if (!node)
+		return 0;
+
+	pp = ebmb_entry(node, struct psk_pair, node);
+
+	keylen = strlen(pp->key);
+	if(keylen > max_psk_len)
+		return 0;
+
+	memcpy(psk, pp->key, keylen);
+
+	return keylen;
+}
+
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
 static int ssl_tlsext_ticket_key_cb(SSL *s, unsigned char key_name[16], unsigned char *iv, EVP_CIPHER_CTX *ectx, HMAC_CTX *hctx, int enc)
 {
@@ -2798,6 +2823,9 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 	}
 #endif
 
+	if(ebmb_first(&bind_conf->psk))
+		SSL_CTX_set_psk_server_callback(ctx, ssl_srv_psk_cb);
+
 	if (global.tune.ssllifetime)
 		SSL_CTX_set_timeout(ctx, global.tune.ssllifetime);
 
@@ -2957,6 +2985,32 @@ static int ssl_sock_srv_hostcheck(const char *pattern, const char *hostname)
 		return 0;
 
 	return 1;
+}
+
+static int ssl_sock_client_psk_cb(SSL *ssl, const char *hint, char *identity, unsigned int max_identity_len, unsigned char *psk, unsigned int max_psk_len)
+{
+	struct connection *conn;
+	struct server *srv;
+	int keylen;
+	int ret;
+
+	(void) hint;
+
+	conn = SSL_get_app_data(ssl);
+	srv = objt_server(conn->target);
+
+	if(strlen(srv->ssl_ctx.psk_identity) + 1 > max_identity_len)
+		return 0;
+
+	strcpy(identity, srv->ssl_ctx.psk_identity);
+
+	keylen = strlen(srv->ssl_ctx.psk_key);
+	if(keylen > max_psk_len)
+		return 0;
+
+	memcpy(psk, srv->ssl_ctx.psk_key, keylen);
+
+	return keylen;
 }
 
 static int ssl_sock_srv_verifycbk(int ok, X509_STORE_CTX *ctx)
@@ -3183,6 +3237,9 @@ int ssl_sock_prepare_srv_ctx(struct server *srv, struct proxy *curproxy)
 		      srv->conf.file, srv->conf.line, srv->ssl_ctx.ciphers);
 		cfgerr++;
 	}
+
+	if (srv->ssl_ctx.psk_identity && srv->ssl_ctx.psk_key)
+		SSL_CTX_set_psk_client_callback(srv->ssl_ctx.ctx, ssl_sock_client_psk_cb);
 
 	return cfgerr;
 }
@@ -5510,6 +5567,56 @@ static int bind_parse_alpn(char **args, int cur_arg, struct proxy *px, struct bi
 #endif
 }
 
+/* parse the "psk-file" bind keyword */
+static int bind_parse_psk_file(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	FILE *f;
+	int i = 0;
+	char thisline[LINESIZE];
+	struct psk_pair *pp;
+	char *key;
+
+	if (!*args[cur_arg + 1]) {
+		if (err)
+			memprintf(err, "'%s' : missing PSK file path", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	if ((f = fopen(args[cur_arg + 1], "r")) == NULL) {
+		if (err)
+			memprintf(err, "'%s' : unable to load ssl PSK file", args[cur_arg+1]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	while (fgets(thisline, sizeof(thisline), f) != NULL) {
+		int len = strlen(thisline);
+		i++;
+		/* Strip newline characters from the end */
+		if(thisline[len - 1] == '\n')
+			thisline[--len] = 0;
+
+		if(thisline[len - 1] == '\r')
+			thisline[--len] = 0;
+
+		key = strchr(thisline, ':');
+		if (!key || key == thisline || key == thisline + len - 1) {
+			if (err)
+				memprintf(err, "'%s' : unable to load ssl PSK file, syntax error at line %d", args[cur_arg+1], i);
+			return ERR_ALERT | ERR_FATAL;
+		}
+
+		*key++ = '\0';
+
+		pp = calloc(1, sizeof(*pp) + strlen(thisline) + 1);
+		memcpy(pp->node.key, thisline, strlen(thisline) + 1);
+		pp->key = strdup(key);
+
+		ebst_insert(&conf->psk, &pp->node);
+	}
+
+	return 0;
+}
+
 /* parse the "ssl" bind keyword */
 static int bind_parse_ssl(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
 {
@@ -5809,6 +5916,30 @@ static int srv_parse_no_tls_tickets(char **args, int *cur_arg, struct proxy *px,
 	newsrv->ssl_ctx.options |= SRV_SSL_O_NO_TLS_TICKETS;
 	return 0;
 }
+
+static int srv_parse_psk(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+{
+	char *key;
+
+	if (!*args[*cur_arg + 1]) {
+		memprintf(err, "'%s' : missing PSK pair in format <identity>:<key>", args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+       }
+
+       key = strchr(args[*cur_arg + 1], ':');
+       if (!key || key == args[*cur_arg + 1] || key == args[*cur_arg + 1] + strlen(args[*cur_arg + 1]) - 1) {
+               if (err)
+                       memprintf(err, "'%s' : unable to load ssl PSK file in format <identity>:<key>", args[*cur_arg+1]);
+               return ERR_ALERT | ERR_FATAL;
+       }
+
+       *key++ = '\0';
+       newsrv->ssl_ctx.psk_identity = strdup(args[*cur_arg+1]);
+       newsrv->ssl_ctx.psk_key = strdup(key);
+
+       return 0;
+}
+
 /* parse the "send-proxy-v2-ssl" server keyword */
 static int srv_parse_send_proxy_ssl(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
 {
@@ -6362,6 +6493,7 @@ static struct bind_kw_list bind_kws = { "SSL", { }, {
 	{ "no-tlsv11",             bind_parse_no_tlsv11,       0 }, /* disable TLSv11 */
 	{ "no-tlsv12",             bind_parse_no_tlsv12,       0 }, /* disable TLSv12 */
 	{ "no-tls-tickets",        bind_parse_no_tls_tickets,  0 }, /* disable session resumption tickets */
+	{ "psk-file",              bind_parse_psk_file,        1 }, /* load the file containing PSKs */
 	{ "ssl",                   bind_parse_ssl,             0 }, /* enable SSL processing */
 	{ "strict-sni",            bind_parse_strict_sni,      0 }, /* refuse negotiation if sni doesn't match a certificate */
 	{ "tls-ticket-keys",       bind_parse_tls_ticket_keys, 1 }, /* set file to load TLS ticket keys from */
@@ -6393,6 +6525,7 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 	{ "no-tlsv11",             srv_parse_no_tlsv11,      0, 0 }, /* disable TLSv11 */
 	{ "no-tlsv12",             srv_parse_no_tlsv12,      0, 0 }, /* disable TLSv12 */
 	{ "no-tls-tickets",        srv_parse_no_tls_tickets, 0, 0 }, /* disable session resumption tickets */
+	{ "psk",                   srv_parse_psk,            1, 0 }, /* PSK */
 	{ "send-proxy-v2-ssl",     srv_parse_send_proxy_ssl, 0, 0 }, /* send PROXY protocol header v2 with SSL info */
 	{ "send-proxy-v2-ssl-cn",  srv_parse_send_proxy_cn,  0, 0 }, /* send PROXY protocol header v2 with CN */
 	{ "sni",                   srv_parse_sni,            1, 0 }, /* send SNI extension */

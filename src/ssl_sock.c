@@ -498,7 +498,7 @@ end:
 	return ret;
 }
 
-static int ssl_srv_psk_cb(SSL *ssl, char *identity, unsigned char *psk, unsigned int max_psk_len)
+static unsigned int ssl_srv_psk_cb(SSL *ssl, const char *identity, unsigned char *psk, unsigned int max_psk_len)
 {
 	struct connection *conn;
 	struct ebmb_node *node;
@@ -2987,12 +2987,11 @@ static int ssl_sock_srv_hostcheck(const char *pattern, const char *hostname)
 	return 1;
 }
 
-static int ssl_sock_client_psk_cb(SSL *ssl, const char *hint, char *identity, unsigned int max_identity_len, unsigned char *psk, unsigned int max_psk_len)
+static unsigned int ssl_sock_client_psk_cb(SSL *ssl, const char *hint, char *identity, unsigned int max_identity_len, unsigned char *psk, unsigned int max_psk_len)
 {
 	struct connection *conn;
 	struct server *srv;
 	int keylen;
-	int ret;
 
 	(void) hint;
 
